@@ -26,6 +26,10 @@ export default function LoginPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
 
+  // signup-only
+  const [firstName, setFirstName] = useState("");
+  const [lastName, setLastName] = useState("");
+
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -135,9 +139,24 @@ export default function LoginPage() {
       }
 
       // SIGN UP
+      const fn = firstName.trim();
+      const ln = lastName.trim();
+
+      if (!fn || !ln) {
+        setErr("Please enter your first and last name.");
+        setBusy(false);
+        return;
+      }
+
       const { data, error } = await supabase.auth.signUp({
         email: cleanEmail,
         password: cleanPass,
+        options: {
+          data: {
+            first_name: fn,
+            last_name: ln,
+          },
+        },
       });
 
       if (error) {
@@ -155,6 +174,8 @@ export default function LoginPage() {
       setMsg("Account created. Check your email to confirm, then log in.");
       setMode("login");
       setPassword("");
+      setFirstName("");
+      setLastName("");
       setBusy(false);
     } catch (e: any) {
       setErr(e?.message ?? "Something went wrong.");
@@ -163,11 +184,7 @@ export default function LoginPage() {
   }
 
   const title =
-    mode === "login"
-      ? "Login"
-      : mode === "signup"
-      ? "Create account"
-      : "Reset password";
+    mode === "login" ? "Login" : mode === "signup" ? "Create account" : "Reset password";
 
   const showPassword = mode !== "forgot";
 
@@ -189,6 +206,35 @@ export default function LoginPage() {
             fontSize: 18,
           }}
         />
+
+        {mode === "signup" && (
+          <>
+            <input
+              placeholder="First name"
+              value={firstName}
+              onChange={(e) => setFirstName(e.target.value)}
+              required
+              style={{
+                padding: 14,
+                borderRadius: 12,
+                border: "1px solid #e5e7eb",
+                fontSize: 18,
+              }}
+            />
+            <input
+              placeholder="Last name"
+              value={lastName}
+              onChange={(e) => setLastName(e.target.value)}
+              required
+              style={{
+                padding: 14,
+                borderRadius: 12,
+                border: "1px solid #e5e7eb",
+                fontSize: 18,
+              }}
+            />
+          </>
+        )}
 
         {showPassword && (
           <>
@@ -247,6 +293,8 @@ export default function LoginPage() {
             onClick={() => {
               setMode("signup");
               resetNotices();
+              setFirstName("");
+              setLastName("");
             }}
             style={{
               background: "transparent",
@@ -267,6 +315,8 @@ export default function LoginPage() {
             onClick={() => {
               setMode("login");
               resetNotices();
+              setFirstName("");
+              setLastName("");
             }}
             style={{
               background: "transparent",
