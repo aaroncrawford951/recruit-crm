@@ -3,7 +3,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
-import { supabase } from "@/lib/supabase";
+import { supabaseBrowser } from "@/lib/supabase-browser";
+import { waitForSession } from "@/lib/waitForSession";
 
 type MessageRow = {
   id: string;
@@ -13,7 +14,6 @@ type MessageRow = {
   created_at: string;
   from_phone: string | null;
   to_phone: string | null;
-  read_at?: string | null;
 };
 
 type RecruitRow = {
@@ -23,10 +23,17 @@ type RecruitRow = {
   phone: string | null;
 };
 
+function formatName(first: string | null, last: string | null) {
+  const n = `${first ?? ""} ${last ?? ""}`.trim();
+  return n || "Recruit";
+}
+
 export default function InboxThreadPage() {
   const router = useRouter();
   const params = useParams();
   const recruitId = (params?.recruitId as string) || "";
+
+  const [supabase] = useState(() => supabaseBrowser());
 
   const [recruit, setRecruit] = useState<RecruitRow | null>(null);
   const [messages, setMessages] = useState<MessageRow[]>([]);
@@ -36,36 +43,41 @@ export default function InboxThreadPage() {
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
 
-  const title = useMemo(() => {
-    const n = `${recruit?.first_name ?? ""} ${recruit?.last_name ?? ""}`.trim();
-    return n || "Recruit";
-  }, [recruit]);
+  const title = useMemo(() => formatName(recruit?.first_name ?? null, recruit?.last_name ?? null), [recruit]);
 
-  const loadThread = async () => {
+  async function markThreadRead(ownerUserId: string) {
+    // This is what your inbox_threads view uses to determine unread
+    const { error } = await supabase.from("inbox_reads").upsert(
+      {
+        owner_user_id: ownerUserId,
+        recruit_id: recruitId,
+        last_read_at: new Date().toISOString(),
+      },
+      { onConflict: "owner_user_id,recruit_id" }
+    );
+
+    // Don't block the page if this fails, but do show a useful error.
+    if (error) {
+      console.warn("Failed to mark thread read:", error.message);
+    }
+  }
+
+  async function loadThread() {
     setLoading(true);
     setErr(null);
 
     // ---- Auth guard ----
-    const { data: sess } = await supabase.auth.getSession();
-    if (!sess.session) {
+    const session = await waitForSession(supabase, 1500);
+    if (!session) {
       const returnTo = window.location.pathname + window.location.search;
       window.location.href = `/login?returnTo=${encodeURIComponent(returnTo)}`;
       return;
     }
 
-    // ✅ STEP 4 GOES HERE:
-    // Mark all unread inbound messages in this thread as "read"
-    await supabase
-      .from("messages")
-      .update({ read_at: new Date().toISOString() })
-      .eq("recruit_id", recruitId)
-      .eq("direction", "inbound")
-      .is("read_at", null);
-
     // ---- Load recruit ----
     const r = await supabase
       .from("recruits")
-      .select("id, first_name, last_name, phone")
+      .select("id, first_name, last_name, phone, owner_user_id")
       .eq("id", recruitId)
       .single();
 
@@ -74,12 +86,23 @@ export default function InboxThreadPage() {
       setLoading(false);
       return;
     }
-    setRecruit(r.data as any);
+
+    const ownerUserId = (r.data as any).owner_user_id as string;
+
+    setRecruit({
+      id: r.data.id,
+      first_name: r.data.first_name,
+      last_name: r.data.last_name,
+      phone: r.data.phone,
+    });
+
+    // ✅ Mark as read using inbox_reads (matches inbox_threads view)
+    await markThreadRead(ownerUserId);
 
     // ---- Load messages ----
     const m = await supabase
       .from("messages")
-      .select("id, recruit_id, direction, body, created_at, from_phone, to_phone, read_at")
+      .select("id, recruit_id, direction, body, created_at, from_phone, to_phone")
       .eq("recruit_id", recruitId)
       .order("created_at", { ascending: true })
       .limit(500);
@@ -92,7 +115,7 @@ export default function InboxThreadPage() {
 
     setMessages((m.data as any) ?? []);
     setLoading(false);
-  };
+  }
 
   useEffect(() => {
     if (!recruitId) return;
@@ -100,7 +123,7 @@ export default function InboxThreadPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [recruitId]);
 
-  const onSend = async () => {
+  async function onSend() {
     if (!draft.trim()) return;
     if (!recruit?.phone) {
       alert("This recruit has no phone number.");
@@ -141,7 +164,7 @@ export default function InboxThreadPage() {
     setDraft("");
     await loadThread();
     setSending(false);
-  };
+  }
 
   if (loading) return <div style={{ padding: 24 }}>Loading…</div>;
   if (err) return <div style={{ padding: 24, color: "crimson" }}>{err}</div>;

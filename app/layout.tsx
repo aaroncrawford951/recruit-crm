@@ -38,12 +38,6 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             <Link href="/recruits" style={{ color: "white", textDecoration: "none" }}>
               Recruits
             </Link>
-            <Link href="/inbox" style={{ color: "white", textDecoration: "none" }}>
-              Inbox
-            </Link>
-            <Link href="/follow-ups" style={{ color: "white", textDecoration: "none" }}>
-              Follow-ups
-            </Link>
             <Link href="/stages" style={{ color: "white", textDecoration: "none" }}>
               Stages
             </Link>
@@ -52,6 +46,12 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             </Link>
             <Link href="/sequences" style={{ color: "white", textDecoration: "none" }}>
               Sequences
+            </Link>
+            <Link href="/follow-ups" style={{ color: "white", textDecoration: "none" }}>
+              Follow-ups
+            </Link>
+             <Link href="/inbox" style={{ color: "white", textDecoration: "none" }}>
+              Inbox
             </Link>
           </div>
 

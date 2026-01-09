@@ -1,30 +1,17 @@
+// pages/api/cron/send-followups.ts
 import type { NextApiRequest, NextApiResponse } from "next";
 import { createClient } from "@supabase/supabase-js";
-import Twilio from "twilio";
-import { renderTemplate } from "@/lib/renderTemplate";
-
-// ---------- Helpers ----------
-function normalizePhone(raw: string | null): string | null {
-  if (!raw) return null;
-  let cleaned = raw.replace(/[^\d+]/g, "");
-  if (cleaned.startsWith("+")) return cleaned;
-  if (cleaned.length === 10) return `+1${cleaned}`;
-  if (cleaned.length === 11 && cleaned.startsWith("1")) return `+${cleaned}`;
-  if (cleaned.length > 0 && cleaned[0] !== "+") return `+${cleaned}`;
-  return cleaned;
-}
+import { sendSms } from "@/lib/sms/sendSms";
+import { renderSmsFromTemplate } from "@/lib/sms/renderSmsFromTemplate";
 
 function getBool(v: any) {
   return v === "1" || v === "true" || v === "yes";
 }
 
-// ---------- Clients ----------
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY! // must be service role
+  process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
-
-const twilio = Twilio(process.env.TWILIO_ACCOUNT_SID!, process.env.TWILIO_AUTH_TOKEN!);
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   try {
@@ -36,7 +23,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const debug = getBool(req.query.debug);
     const nowIso = new Date().toISOString();
 
-    // 1) get due followups + template + recruit + owner
     const { data: due, error: dueErr } = await supabaseAdmin
       .from("follow_ups")
       .select(
@@ -61,17 +47,10 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     const followUps = (due as any[]) ?? [];
     if (followUps.length === 0) {
-      return res.status(200).json({
-        now: nowIso,
-        debug,
-        checked: 0,
-        sent: 0,
-        failed: 0,
-        previews: [],
-      });
+      return res.status(200).json({ now: nowIso, debug, checked: 0, sent: 0, failed: 0, previews: [] });
     }
 
-    // 2) fetch sender profiles in one query
+    // Load sender profiles in one query
     const ownerIds = Array.from(new Set(followUps.map((x) => x.owner_user_id).filter(Boolean)));
     const { data: profiles, error: pErr } = await supabaseAdmin
       .from("profiles")
@@ -87,7 +66,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     let sent = 0;
     let failed = 0;
-
     const previews: any[] = [];
 
     for (const fu of followUps) {
@@ -99,69 +77,56 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
           | { first_name: string | null; last_name: string | null; phone: string | null }
           | null;
 
-        if (!templateBody) throw new Error("Missing message body (template_id is null or template deleted)");
+        if (!templateBody) throw new Error("Missing message body (template deleted?)");
         if (!recruit) throw new Error("Missing recruit record (recruit deleted?)");
+        if (!recruit.phone) throw new Error("Invalid phone number");
 
-        const to = normalizePhone(recruit.phone);
-        if (!to) throw new Error("Invalid phone number");
+        const senderProfile = profileMap.get(fu.owner_user_id) ?? { first_name: null, last_name: null };
 
-        const senderProfile = profileMap.get(fu.owner_user_id);
-        const senderFirst = senderProfile?.first_name ?? "";
-        const senderLast = senderProfile?.last_name ?? "";
-        const senderFull = `${senderFirst} ${senderLast}`.trim();
+        const renderedBody = renderSmsFromTemplate({
+          templateBody,
+          recruit,
+          sender: senderProfile,
+          prefix: "[CRON_V2]",
+        });
 
-        const renderedBody = renderTemplate(templateBody, {
-          first_name: recruit.first_name ?? "",
-          last_name: recruit.last_name ?? "",
-          full_name: `${recruit.first_name ?? ""} ${recruit.last_name ?? ""}`.trim(),
-
-          sender_first_name: senderFirst,
-          sender_last_name: senderLast,
-          sender_full_name: senderFull,
-
-          // backward compatible token
-          sender_name: senderFull || process.env.SENDER_NAME || "",
-        }).trim();
-
-        if (!renderedBody) throw new Error("Rendered message is empty");
-
-        // Always record preview so we can prove what would send
         previews.push({
           follow_up_id: followUpId,
           scheduled_for: fu.scheduled_for,
           template_body: templateBody,
-          rendered_body: renderedBody,
-          to,
-          recruit,
-          sender: { sender_first_name: senderFirst, sender_last_name: senderLast },
-        });
-
-        if (debug) continue; // debug = no send, no DB updates
-
-        // ✅ THE ACTUAL FIX: send renderedBody (NOT templateBody)
-        const from = process.env.TWILIO_FROM_NUMBER!;
-        const msg = await twilio.messages.create({
-          to,
-          from,
           body: renderedBody,
+          to: recruit.phone,
+          recruit,
+          sender: senderProfile,
         });
 
-        // Log outbound message with rendered text
+        if (debug) continue;
+
+        const msg = await sendSms({
+          to: recruit.phone,
+          body: renderedBody,
+          meta: {
+            route: "pages/api/cron/send-followups",
+            follow_up_id: followUpId,
+            recruit_id: fu.recruit_id,
+            owner_user_id: fu.owner_user_id,
+          },
+        });
+
         const { error: mErr } = await supabaseAdmin.from("messages").insert([
           {
             owner_user_id: fu.owner_user_id,
             recruit_id: fu.recruit_id,
             direction: "outbound",
-            body: renderedBody, // ✅ store rendered
+            body: renderedBody,
             twilio_message_sid: msg.sid,
-            from_phone: from,
-            to_phone: to,
+            from_phone: process.env.TWILIO_FROM_NUMBER || process.env.TWILIO_PHONE_NUMBER || null,
+            to_phone: recruit.phone,
             status: "sent",
           },
         ]);
         if (mErr) throw new Error(`Failed to log message: ${mErr.message}`);
 
-        // Mark follow-up sent
         const { error: uErr } = await supabaseAdmin
           .from("follow_ups")
           .update({
@@ -178,17 +143,19 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         sent++;
       } catch (e: any) {
         failed++;
+        const errMsg = e?.message ?? "Unknown error";
+        const errCode = e?.code ? ` (${e.code})` : "";
 
         if (!debug) {
           await supabaseAdmin
             .from("follow_ups")
             .update({
               status: "cancelled",
-              error_message: e?.message ?? "Unknown error",
+              error_message: `${errMsg}${errCode}`,
               last_attempt_at: new Date().toISOString(),
               attempt_count: (fu.attempt_count ?? 0) + 1,
             })
-            .eq("id", followUpId);
+            .eq("id", fu.id);
         }
       }
     }
@@ -199,7 +166,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       checked: followUps.length,
       sent,
       failed,
-      previews: debug ? previews : [], // only return previews in debug mode
+      previews: debug ? previews : [],
       note: debug ? "debug=1 → no sends, no DB updates" : "live run",
     });
   } catch (e: any) {

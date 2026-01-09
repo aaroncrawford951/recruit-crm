@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { supabaseBrowser } from "@/lib/supabase-browser";
 
 type Mode = "login" | "signup" | "forgot";
@@ -17,8 +17,31 @@ function getReturnToFromUrl(): string {
   return raw;
 }
 
+function getSiteOrigin(): string {
+  if (typeof window === "undefined") return "";
+  return window.location.origin;
+}
+
+function validateEmail(e: string) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e.trim());
+}
+
+function passwordHint(p: string) {
+  const min = p.length >= 8;
+  const hasLetter = /[A-Za-z]/.test(p);
+  const hasNumber = /\d/.test(p);
+  if (min && hasLetter && hasNumber) return "Strong enough.";
+  const missing = [
+    !min ? "8+ chars" : null,
+    !hasLetter ? "a letter" : null,
+    !hasNumber ? "a number" : null,
+  ].filter(Boolean);
+  return `Suggested: include ${missing.join(", ")}.`;
+}
+
 export default function LoginPage() {
-  const supabase = useMemo(() => supabaseBrowser(), []);
+  const supabaseRef = useRef(supabaseBrowser());
+  const supabase = supabaseRef.current;
 
   const [mode, setMode] = useState<Mode>("login");
   const [returnTo, setReturnTo] = useState("/recruits");
@@ -38,23 +61,29 @@ export default function LoginPage() {
     setReturnTo(getReturnToFromUrl());
   }, []);
 
-  // If already logged in, bounce to returnTo (not always /recruits)
   useEffect(() => {
     let cancelled = false;
 
-    const run = async () => {
+    // If already logged in, redirect
+    (async () => {
       const { data } = await supabase.auth.getSession();
       if (cancelled) return;
-
       if (data.session) {
-        window.location.href = returnTo || "/recruits";
+        window.location.assign(returnTo || "/recruits");
       }
-    };
+    })();
 
-    run();
+    // Redirect whenever a session appears
+    const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (cancelled) return;
+      if (session) {
+        window.location.assign(returnTo || "/recruits");
+      }
+    });
 
     return () => {
       cancelled = true;
+      sub.subscription.unsubscribe();
     };
   }, [supabase, returnTo]);
 
@@ -63,62 +92,42 @@ export default function LoginPage() {
     setMsg(null);
   }
 
-  function validateEmail(e: string) {
-    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e.trim());
-  }
-
-  function passwordHint(p: string) {
-    const min = p.length >= 8;
-    const hasLetter = /[A-Za-z]/.test(p);
-    const hasNumber = /\d/.test(p);
-    if (min && hasLetter && hasNumber) return "Strong enough.";
-    const missing = [
-      !min ? "8+ chars" : null,
-      !hasLetter ? "a letter" : null,
-      !hasNumber ? "a number" : null,
-    ].filter(Boolean);
-    return `Suggested: include ${missing.join(", ")}.`;
-  }
-
-  async function onSubmit(e: React.FormEvent) {
+  async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setBusy(true);
     resetNotices();
 
     const cleanEmail = email.trim();
     const cleanPass = password;
+    const origin = getSiteOrigin();
 
     try {
       if (!validateEmail(cleanEmail)) {
         setErr("Please enter a valid email address.");
-        setBusy(false);
         return;
       }
 
       if (mode === "forgot") {
-        const redirectTo =
-          typeof window !== "undefined"
-            ? `${window.location.origin}/reset-password`
-            : undefined;
+        if (!origin) {
+          setErr("Missing site origin (try again after page loads).");
+          return;
+        }
 
         const { error } = await supabase.auth.resetPasswordForEmail(cleanEmail, {
-          redirectTo,
+          redirectTo: `${origin}/reset-password`,
         });
 
         if (error) {
           setErr(error.message);
-          setBusy(false);
           return;
         }
 
         setMsg("Password reset email sent. Check your inbox (and spam).");
-        setBusy(false);
         return;
       }
 
       if (!cleanPass) {
         setErr("Please enter a password.");
-        setBusy(false);
         return;
       }
 
@@ -129,12 +138,18 @@ export default function LoginPage() {
         });
 
         if (error) {
-          setErr(error.message);
-          setBusy(false);
+          const m = (error.message || "").toLowerCase();
+          if (m.includes("email not confirmed") || m.includes("confirm")) {
+            setErr(
+              "Your account exists, but your email isn’t confirmed yet. Check your inbox (and spam) for the confirmation link, then try logging in again."
+            );
+          } else {
+            setErr(error.message);
+          }
           return;
         }
 
-        window.location.href = returnTo || "/recruits";
+        window.location.assign(returnTo || "/recruits");
         return;
       }
 
@@ -144,7 +159,11 @@ export default function LoginPage() {
 
       if (!fn || !ln) {
         setErr("Please enter your first and last name.");
-        setBusy(false);
+        return;
+      }
+
+      if (!origin) {
+        setErr("Missing site origin (try again after page loads).");
         return;
       }
 
@@ -152,33 +171,32 @@ export default function LoginPage() {
         email: cleanEmail,
         password: cleanPass,
         options: {
-          data: {
-            first_name: fn,
-            last_name: ln,
-          },
+          data: { first_name: fn, last_name: ln },
+          emailRedirectTo: `${origin}/login`,
         },
       });
 
       if (error) {
         setErr(error.message);
-        setBusy(false);
         return;
       }
 
-      // If email confirmation is ON: no session yet.
+      // If confirmations are OFF, you'll get a session immediately
       if (data.session) {
-        window.location.href = returnTo || "/recruits";
+        window.location.assign(returnTo || "/recruits");
         return;
       }
 
-      setMsg("Account created. Check your email to confirm, then log in.");
+      setMsg("Account created. Check your email to confirm your account, then log in.");
       setMode("login");
       setPassword("");
       setFirstName("");
       setLastName("");
-      setBusy(false);
-    } catch (e: any) {
-      setErr(e?.message ?? "Something went wrong.");
+    } catch (ex: unknown) {
+      const message =
+        ex instanceof Error ? ex.message : "Something went wrong. Please try again.";
+      setErr(message);
+    } finally {
       setBusy(false);
     }
   }
@@ -251,7 +269,6 @@ export default function LoginPage() {
                 fontSize: 18,
               }}
             />
-
             {mode === "signup" && (
               <div style={{ fontSize: 12, opacity: 0.75, marginTop: -6 }}>
                 {passwordHint(password)}

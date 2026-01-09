@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { supabase } from "@/lib/supabase";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { supabaseBrowser } from "@/lib/supabase-browser";
 
 type TemplateRow = {
   id: string;
@@ -19,10 +19,13 @@ function arrayMove<T>(arr: T[], from: number, to: number) {
 }
 
 export default function TemplatesPage() {
+  const supabase = useMemo(() => supabaseBrowser(), []);
+
   const [authLoading, setAuthLoading] = useState(true);
   const [userId, setUserId] = useState<string | null>(null);
 
   const [templates, setTemplates] = useState<TemplateRow[]>([]);
+
   const [loading, setLoading] = useState(true);
   const [savingOrder, setSavingOrder] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -32,24 +35,27 @@ export default function TemplatesPage() {
 
   const dragFromIdRef = useRef<string | null>(null);
 
-  // ---- Auth check (so RLS works)
+  // ---- Auth check
   useEffect(() => {
     const run = async () => {
       setAuthLoading(true);
+      setErr(null);
+
       const { data, error } = await supabase.auth.getUser();
       if (error) {
         setUserId(null);
       } else {
         setUserId(data.user?.id ?? null);
       }
+
       setAuthLoading(false);
     };
+
     run();
-  }, []);
+  }, [supabase]);
 
   async function loadTemplates() {
     setErr(null);
-    setLoading(true);
 
     const res = await supabase
       .from("message_templates")
@@ -60,17 +66,25 @@ export default function TemplatesPage() {
     if (res.error) {
       setErr(res.error.message);
       setTemplates([]);
-      setLoading(false);
       return;
     }
 
     setTemplates((res.data ?? []) as TemplateRow[]);
-    setLoading(false);
   }
 
   useEffect(() => {
     if (!userId) return;
-    loadTemplates();
+
+    const run = async () => {
+      setLoading(true);
+      try {
+        await loadTemplates();
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    run();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId]);
 
@@ -88,7 +102,7 @@ export default function TemplatesPage() {
 
     setLoading(true);
     try {
-      // Put new template at end of list for THIS user
+      // Put new template at end
       const maxRes = await supabase
         .from("message_templates")
         .select("sort_order")
@@ -123,10 +137,12 @@ export default function TemplatesPage() {
 
   async function deleteTemplate(id: string) {
     setErr(null);
+
     setLoading(true);
     try {
       const del = await supabase.from("message_templates").delete().eq("id", id);
       if (del.error) throw new Error(del.error.message);
+
       await loadTemplates();
     } catch (e: any) {
       setErr(e?.message ?? "Failed to delete template.");
@@ -138,14 +154,18 @@ export default function TemplatesPage() {
   async function persistOrder(newList: TemplateRow[]) {
     setSavingOrder(true);
     setErr(null);
+
     try {
-      // Save 1..N order
       for (let i = 0; i < newList.length; i++) {
         const t = newList[i];
-        const upd = await supabase.from("message_templates").update({ sort_order: i + 1 }).eq("id", t.id);
+        const upd = await supabase
+          .from("message_templates")
+          .update({ sort_order: i + 1 })
+          .eq("id", t.id);
+
         if (upd.error) throw new Error(upd.error.message);
       }
-      // Update local state (so UI shows correct numbers immediately)
+
       setTemplates(newList.map((t, idx) => ({ ...t, sort_order: idx + 1 })));
     } catch (e: any) {
       setErr(e?.message ?? "Failed to save order.");
@@ -174,9 +194,7 @@ export default function TemplatesPage() {
     await persistOrder(newList);
   }
 
-  if (authLoading) {
-    return <div style={{ padding: 24 }}>Checking login…</div>;
-  }
+  if (authLoading) return <div style={{ padding: 24 }}>Checking login…</div>;
 
   if (!userId) {
     return (
@@ -193,10 +211,10 @@ export default function TemplatesPage() {
     <div style={{ padding: 24, maxWidth: 980 }}>
       <h1 style={{ fontSize: 24, fontWeight: 700 }}>Templates</h1>
       <p style={{ opacity: 0.75, marginTop: 6 }}>
-        Drag templates to reorder. This order will show in your Sequences template dropdown too (once we sort by it).
+        Drag templates to reorder.
       </p>
 
-      {err && <div style={{ marginTop: 12, color: "crimson" }}>{err}</div>}
+      {err && <div style={{ marginTop: 12, color: "crimson", whiteSpace: "pre-wrap" }}>{err}</div>}
 
       {/* Create */}
       <div style={{ marginTop: 16, border: "1px solid #e5e5e5", borderRadius: 12, padding: 12 }}>
@@ -214,7 +232,12 @@ export default function TemplatesPage() {
             onChange={(e) => setBody(e.target.value)}
             placeholder="Message body (SMS)…"
             rows={4}
-            style={{ padding: 10, borderRadius: 10, border: "1px solid #e5e5e5", resize: "vertical" }}
+            style={{
+              padding: 10,
+              borderRadius: 10,
+              border: "1px solid #e5e5e5",
+              resize: "vertical",
+            }}
           />
 
           <button

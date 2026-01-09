@@ -10,6 +10,7 @@ type Stage = {
   name: string;
   sort_order: number;
   is_locked?: boolean | null;
+  created_at?: string | null;
 };
 
 type Recruit = {
@@ -31,6 +32,23 @@ export default function RecruitsPage() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
+  // Always show locked stages (Intake) at the top even if data comes back oddly
+  const stagesForDropdown = useMemo(() => {
+    const copy = [...stages];
+    copy.sort((a, b) => {
+      const al = a.is_locked ? 1 : 0;
+      const bl = b.is_locked ? 1 : 0;
+      if (al !== bl) return bl - al; // locked first
+      const as = Number.isFinite(a.sort_order) ? a.sort_order : 999999;
+      const bs = Number.isFinite(b.sort_order) ? b.sort_order : 999999;
+      if (as !== bs) return as - bs;
+      const ac = a.created_at ? new Date(a.created_at).getTime() : 0;
+      const bc = b.created_at ? new Date(b.created_at).getTime() : 0;
+      return ac - bc;
+    });
+    return copy;
+  }, [stages]);
+
   const stageNamesLower = useMemo(() => {
     return new Set(stages.map((s) => (s.name ?? "").trim().toLowerCase()));
   }, [stages]);
@@ -41,9 +59,13 @@ export default function RecruitsPage() {
   }
 
   async function loadStages(): Promise<Stage[]> {
+    setErr(null);
+
     const { data, error } = await supabase
       .from("stages")
-      .select("id, name, sort_order, is_locked")
+      .select("id, name, sort_order, is_locked, created_at")
+      // ✅ Intake (locked) stays pinned to top:
+      .order("is_locked", { ascending: false })
       .order("sort_order", { ascending: true })
       .order("created_at", { ascending: true });
 
@@ -92,7 +114,6 @@ export default function RecruitsPage() {
 
         const { error: bootErr } = await supabase.rpc("bootstrap_user_defaults");
         if (bootErr) {
-          // Don't break UI, just log
           console.warn("bootstrap_user_defaults failed:", bootErr.message);
         }
       } catch (e: any) {
@@ -197,7 +218,7 @@ export default function RecruitsPage() {
 
   return (
     <main style={{ padding: 40 }}>
-<PageTitle>Recruits</PageTitle>
+      <PageTitle>Recruits</PageTitle>
 
       <form
         onSubmit={addRecruit}
@@ -267,13 +288,14 @@ export default function RecruitsPage() {
                       return;
                     }
 
-                    // Update UI immediately
                     setRecruits((prev) => prev.map((x) => (x.id === r.id ? { ...x, stage_id: stageId } : x)));
                   }}
                   style={{ minWidth: 220 }}
                 >
                   <option value="">—</option>
-                  {stages.map((s) => (
+
+                  {/* ✅ Intake (locked) will render first */}
+                  {stagesForDropdown.map((s) => (
                     <option key={s.id} value={s.id}>
                       {s.name}
                     </option>

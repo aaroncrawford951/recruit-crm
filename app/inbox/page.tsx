@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import PageTitle from "@/app/components/PageTitle";
 import { supabaseBrowser } from "@/lib/supabase-browser";
@@ -8,31 +8,84 @@ import { waitForSession } from "@/lib/waitForSession";
 
 type InboxThreadRow = {
   recruit_id: string;
+  owner_user_id: string;
   first_name: string | null;
   last_name: string | null;
   phone: string | null;
 
   last_message_at: string | null;
-  last_direction: "inbound" | "outbound" | null;
-  last_body: string | null;
+  last_message_body: string | null;
 
-  unread_count: number;
+  is_unread: boolean | null;
 };
+
+function formatName(first: string | null, last: string | null) {
+  const name = `${first ?? ""} ${last ?? ""}`.trim();
+  return name || "Recruit";
+}
+
+function formatTimestamp(iso: string | null) {
+  if (!iso) return "—";
+  try {
+    return new Date(iso).toLocaleString("en-CA", {
+      timeZone: "America/Edmonton",
+      month: "short",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  } catch {
+    return "—";
+  }
+}
 
 export default function InboxPage() {
   const [supabase] = useState(() => supabaseBrowser());
 
   const [authReady, setAuthReady] = useState(false);
+  const [userId, setUserId] = useState<string | null>(null);
+
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
-
   const [threads, setThreads] = useState<InboxThreadRow[]>([]);
 
-  // ---- Auth guard ----
+  // avoids spam-refresh if multiple messages arrive quickly
+  const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const loadThreads = async () => {
+    setErr(null);
+
+    const { data, error } = await supabase
+      .from("inbox_threads")
+      .select(
+        "recruit_id, owner_user_id, first_name, last_name, phone, last_message_at, last_message_body, is_unread"
+      )
+      .order("last_message_at", { ascending: false })
+      .limit(300);
+
+    if (error) {
+      setErr(error.message);
+      setThreads([]);
+      return;
+    }
+
+    setThreads((data as InboxThreadRow[]) ?? []);
+  };
+
+  const scheduleRefresh = () => {
+    if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
+    refreshTimerRef.current = setTimeout(() => {
+      loadThreads();
+    }, 250); // small debounce to batch multiple inserts
+  };
+
+  // ---- Auth guard + initial load ----
   useEffect(() => {
     let cancelled = false;
 
     const run = async () => {
+      setLoading(true);
+
       const session = await waitForSession(supabase, 1500);
       if (cancelled) return;
 
@@ -42,41 +95,61 @@ export default function InboxPage() {
         return;
       }
 
+      setUserId(session.user.id);
       setAuthReady(true);
-    };
 
-    run();
-    return () => {
-      cancelled = true;
-    };
-  }, [supabase]);
-
-  // ---- Load inbox threads ----
-  useEffect(() => {
-    if (!authReady) return;
-
-    const load = async () => {
-      setLoading(true);
-      setErr(null);
-
-      const { data, error } = await supabase
-        .from("inbox_threads")
-        .select("recruit_id, first_name, last_name, phone, last_message_at, last_direction, last_body, unread_count")
-        .order("last_message_at", { ascending: false, nullsFirst: false })
-        .limit(300);
-
-      if (error) {
-        setErr(error.message);
-        setThreads([]);
-      } else {
-        setThreads((data as InboxThreadRow[]) ?? []);
-      }
-
+      await loadThreads();
       setLoading(false);
     };
 
-    load();
-  }, [authReady, supabase]);
+    run();
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [supabase]);
+
+  // ---- Realtime: refresh inbox when new messages arrive ----
+  useEffect(() => {
+    if (!authReady || !userId) return;
+
+    // Subscribe to messages INSERT for this user.
+    // When inbound webhook inserts a message row, we refresh inbox_threads.
+    const channel = supabase
+      .channel(`inbox-messages-${userId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "messages",
+          filter: `owner_user_id=eq.${userId}`,
+        },
+        (_payload) => {
+          scheduleRefresh();
+        }
+      )
+      .subscribe((status) => {
+        // Optional: helpful for debugging realtime connection
+        // console.log("[realtime] inbox channel status:", status);
+      });
+
+    return () => {
+      if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
+      supabase.removeChannel(channel);
+    };
+  }, [authReady, userId, supabase]);
+
+  // Optional: keep it fresh when tab refocuses
+  useEffect(() => {
+    if (!authReady) return;
+
+    const onFocus = () => loadThreads();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authReady]);
 
   if (!authReady) return <main style={{ padding: 24 }}>Checking login…</main>;
 
@@ -85,7 +158,7 @@ export default function InboxPage() {
       <PageTitle>Inbox</PageTitle>
 
       <p style={{ opacity: 0.7, marginTop: -6 }}>
-        Sorted by most recent activity. Threads with unread inbound messages are bold.
+        Live updates enabled. New inbound messages will bump the thread to the top.
       </p>
 
       {loading && <p style={{ marginTop: 12, opacity: 0.8 }}>Loading…</p>}
@@ -95,8 +168,8 @@ export default function InboxPage() {
         {!loading &&
           !err &&
           threads.map((t) => {
-            const name = `${t.first_name ?? ""} ${t.last_name ?? ""}`.trim() || "Recruit";
-            const isUnread = (t.unread_count ?? 0) > 0;
+            const name = formatName(t.first_name, t.last_name);
+            const isUnread = !!t.is_unread;
 
             return (
               <Link
@@ -132,20 +205,12 @@ export default function InboxPage() {
                   </div>
 
                   <div style={{ fontSize: 12, opacity: 0.75, fontWeight: isUnread ? 800 : 500 }}>
-                    {t.last_message_at
-                      ? new Date(t.last_message_at).toLocaleString("en-CA", {
-                          timeZone: "America/Edmonton",
-                          month: "short",
-                          day: "2-digit",
-                          hour: "2-digit",
-                          minute: "2-digit",
-                        })
-                      : "—"}
+                    {formatTimestamp(t.last_message_at)}
                   </div>
                 </div>
 
                 <div style={{ marginTop: 6, fontSize: 12, opacity: 0.85, fontWeight: isUnread ? 700 : 400 }}>
-                  {t.last_body ? t.last_body.slice(0, 120) : "No messages yet."}
+                  {t.last_message_body ? t.last_message_body.slice(0, 120) : "No messages yet."}
                 </div>
 
                 <div style={{ marginTop: 6, fontSize: 12, opacity: 0.8 }}>

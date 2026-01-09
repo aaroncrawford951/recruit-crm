@@ -1,8 +1,8 @@
 {
   "crons": [
     {
-      "path": "/api/cron/send-followups?secret=some-long-random-string",
-      "schedule": "*/1 * * * *"
+      "path": "/api/cron/send-followups?secret=$some-long-random-string",
+      "schedule": "*/5 * * * *"
     }
   ]
 }

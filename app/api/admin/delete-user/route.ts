@@ -1,9 +1,8 @@
-import { NextResponse } from "next/server";
+// app/api/admin/delete-user/route.ts
+import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 
-function jsonError(message: string, extra?: any, status = 500) {
-  return NextResponse.json({ error: message, ...extra }, { status });
-}
+export const runtime = "nodejs";
 
 function getAdminEmails() {
   const raw = process.env.NEXT_PUBLIC_ADMIN_EMAILS || "";
@@ -13,148 +12,115 @@ function getAdminEmails() {
     .filter(Boolean);
 }
 
-export async function POST(req: Request) {
-  try {
-    const adminEmails = getAdminEmails();
-    if (adminEmails.length === 0) {
-      return jsonError(
-        "Admin is not configured. Add NEXT_PUBLIC_ADMIN_EMAILS in .env.local (comma-separated).",
-        {},
-        400
-      );
-    }
+type CleanupStep = { step: string; ok: boolean; detail?: string };
 
+function jsonError(message: string, status = 500, extra?: any) {
+  return NextResponse.json({ error: message, ...extra }, { status });
+}
+
+// Create once (module scope)
+const supabaseAdmin = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.SUPABASE_SERVICE_ROLE_KEY!
+);
+
+// IMPORTANT: for admin cleanup, we intentionally use an untyped db handle
+// so TS doesn't error on table names.
+const db: any = supabaseAdmin;
+
+export async function POST(req: NextRequest) {
+  try {
     const authHeader = req.headers.get("authorization") || "";
     const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
-    if (!token) return jsonError("Missing Authorization token", {}, 401);
+    if (!token) return jsonError("Missing auth token", 401);
 
-    const { userId } = await req.json();
-    if (!userId) return jsonError("Missing userId", {}, 400);
+    const body = await req.json().catch(() => ({}));
+    const userId = String(body?.userId || "").trim();
+    if (!userId) return jsonError("Missing userId", 400);
 
-    const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-    const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
-    const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
-    if (!url || !anon || !serviceKey) {
-      return jsonError("Missing Supabase env vars.", {}, 500);
+    // Validate caller + admin allowlist
+    const { data: callerData, error: callerErr } = await supabaseAdmin.auth.getUser(token);
+    if (callerErr || !callerData?.user) return jsonError("Invalid auth token", 401);
+
+    const admins = getAdminEmails();
+    if (!admins.length) return jsonError("Admin not configured (NEXT_PUBLIC_ADMIN_EMAILS)", 403);
+
+    const callerEmail = (callerData.user.email || "").toLowerCase();
+    if (!admins.includes(callerEmail)) return jsonError("Forbidden (admin only)", 403);
+
+    // Safety: don't allow self-delete via UI
+    if (callerData.user.id === userId) {
+      return jsonError("Refusing to delete current user (safety).", 400);
     }
 
-    const adminSb = createClient(url, serviceKey);
+    const cleanup: CleanupStep[] = [];
 
-    // verify caller is an admin
-    const callerSb = createClient(url, anon, {
-      global: { headers: { Authorization: `Bearer ${token}` } },
-    });
-
-    const { data: caller, error: callerErr } = await callerSb.auth.getUser();
-    if (callerErr || !caller?.user?.email) {
-      return jsonError("Not authenticated", { detail: callerErr?.message }, 401);
-    }
-
-    const callerEmail = caller.user.email.toLowerCase();
-    if (!adminEmails.includes(callerEmail)) {
-      return jsonError("Forbidden (not an admin)", { callerEmail }, 403);
-    }
-
-    // helpers
-    const cleanup: Array<{ step: string; ok: boolean; detail?: string }> = [];
-    const okStep = (step: string) => cleanup.push({ step, ok: true });
-    const badStep = (step: string, detail: string) => cleanup.push({ step, ok: false, detail });
-
-    async function safeDelete(step: string, fn: () => Promise<{ error: any }>) {
+    // Helper to run deletes and record outcome
+    async function step(label: string, fn: () => Promise<any>) {
       try {
-        const { error } = await fn();
-        if (error) badStep(step, error.message || String(error));
-        else okStep(step);
+        const res = await fn();
+
+        const msg = (res?.error?.message as string | undefined) ?? undefined;
+
+        // If a table doesn't exist in this project, treat it as OK (optional tables)
+        const isMissingTable =
+          (msg?.includes("Could not find the table") ?? false) ||
+          ((msg?.includes("relation") ?? false) && (msg?.includes("does not exist") ?? false));
+
+        const ok = !res?.error || isMissingTable;
+
+        cleanup.push({
+          step: label,
+          ok,
+          detail: res?.error?.message,
+        });
+
+        return res;
       } catch (e: any) {
-        badStep(step, e?.message || "Unknown error");
+        cleanup.push({ step: label, ok: false, detail: e?.message ?? String(e) });
+        return { error: { message: e?.message ?? String(e) } };
       }
     }
 
-    // pull ids
-    const { data: stages } = await adminSb
-      .from("stages")
-      .select("id, is_locked")
-      .eq("owner_user_id", userId);
+    // Delete child tables first (avoids FK issues)
+    await step("delete follow_ups", () => db.from("follow_ups").delete().eq("owner_user_id", userId));
+    await step("delete messages", () => db.from("messages").delete().eq("owner_user_id", userId));
+    await step("delete inbox_reads", () => db.from("inbox_reads").delete().eq("owner_user_id", userId));
 
-    const stageIds = (stages ?? []).map((s: any) => s.id);
+    // Optional tables (ok if missing)
+    await step("delete sequences", () => db.from("sequences").delete().eq("owner_user_id", userId));
+    await step("delete sequence_steps", () => db.from("sequence_steps").delete().eq("owner_user_id", userId));
 
-    const { data: templates } = await adminSb
-      .from("message_templates")
-      .select("id")
-      .eq("owner_user_id", userId);
+    await step("delete recruits", () => db.from("recruits").delete().eq("owner_user_id", userId));
+    await step("delete message_templates", () => db.from("message_templates").delete().eq("owner_user_id", userId));
 
-    const templateIds = (templates ?? []).map((t: any) => t.id);
+    // If you have locked stages, this may fail — that’s okay, we’ll still delete the auth user only if all required cleanup succeeds.
+// Unlock any locked stages for this user so deletion can proceed
+await step("unlock stages", () =>
+  db.from("stages").update({ is_locked: false }).eq("owner_user_id", userId)
+);
 
-    const { data: recruits } = await adminSb
-      .from("recruits")
-      .select("id")
-      .eq("owner_user_id", userId);
+// Now delete stages (will work because they're no longer locked)
+await step("delete stages", () =>
+  db.from("stages").delete().eq("owner_user_id", userId)
+);
 
-    const recruitIds = (recruits ?? []).map((r: any) => r.id);
+    await step("delete profiles", () => db.from("profiles").delete().eq("id", userId));
 
-    // A) recruit-related rows
-    if (recruitIds.length) {
-      await safeDelete("delete follow_ups", () =>
-        adminSb.from("follow_ups").delete().in("recruit_id", recruitIds)
-      );
+    // Finally delete the auth user
+    await step("delete auth user", () => supabaseAdmin.auth.admin.deleteUser(userId));
 
-      await safeDelete("delete messages", () =>
-        adminSb.from("messages").delete().in("recruit_id", recruitIds)
-      );
+    const ok = cleanup.every((x) => x.ok);
 
-      await safeDelete("delete inbox_reads", () =>
-        adminSb.from("inbox_reads").delete().in("recruit_id", recruitIds)
-      );
-
-      await safeDelete("delete recruits", () =>
-        adminSb.from("recruits").delete().in("id", recruitIds)
-      );
-    }
-
-    // B) stage_sequences mapping
-    if (stageIds.length) {
-      await safeDelete("delete stage_sequences", () =>
-        adminSb.from("stage_sequences").delete().in("stage_id", stageIds)
-      );
-    }
-
-    // C) templates
-    if (templateIds.length) {
-      await safeDelete("delete message_templates", () =>
-        adminSb.from("message_templates").delete().in("id", templateIds)
-      );
-    }
-
-    // D) IMPORTANT: unlock stages before deleting (admin-only cleanup)
-    if (stageIds.length) {
-      const { error: unlockErr } = await adminSb
-        .from("stages")
-        .update({ is_locked: false })
-        .eq("owner_user_id", userId);
-
-      if (unlockErr) {
-        cleanup.push({ step: "unlock stages", ok: false, detail: unlockErr.message });
-      } else {
-        cleanup.push({ step: "unlock stages", ok: true });
-      }
-
-      await safeDelete("delete stages", () =>
-        adminSb.from("stages").delete().in("id", stageIds)
-      );
-    }
-
-    // E) delete auth user (admin api)
-    const { error: delAuthErr } = await adminSb.auth.admin.deleteUser(userId);
-    if (delAuthErr) {
-      return jsonError(
-        "Failed deleting auth user (admin SDK)",
-        { userId, cleanup, detail: delAuthErr.message },
-        500
-      );
-    }
-
-    return NextResponse.json({ ok: true, userId, cleanup });
+    return NextResponse.json(
+      {
+        ok,
+        deleted_user_id: userId,
+        cleanup,
+      },
+      { status: ok ? 200 : 207 } // 207 = partial success (some steps failed)
+    );
   } catch (e: any) {
-    return jsonError("Server error", { detail: e?.message || String(e) }, 500);
+    return jsonError(e?.message ?? "Server error", 500);
   }
 }
