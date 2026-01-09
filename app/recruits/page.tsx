@@ -108,24 +108,6 @@ export default function RecruitsPage() {
     }
   }
 
-  // Bootstrap defaults for new users (won’t block UI)
-  useEffect(() => {
-    const runBootstrap = async () => {
-      try {
-        const { data } = await supabase.auth.getSession();
-        if (!data.session) return;
-
-        const { error } = await supabase.rpc("bootstrap_user_defaults");
-        if (error) console.warn("bootstrap_user_defaults failed:", error.message);
-      } catch (e: any) {
-        console.warn("bootstrap_user_defaults exception:", e?.message ?? e);
-      }
-    };
-
-    runBootstrap();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
   // Initial page load
   useEffect(() => {
     loadAll();
