@@ -21,10 +21,12 @@ function getBearerToken(req: NextApiRequest) {
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   try {
-    // ✅ Only allow POST (prevents random browser hits / crawlers)
-    if (req.method !== "POST") {
-      return res.status(405).json({ error: "Method not allowed. Use POST." });
-    }
+// ✅ Allow GET (Vercel Cron uses GET) + POST (manual/testing)
+if (req.method !== "GET" && req.method !== "POST") {
+  return res.status(405).json({ error: "Method not allowed. Use GET or POST." });
+}
+
+
 
     // ✅ CRON secret check
     const configuredSecret = process.env.CRON_SECRET;
@@ -108,7 +110,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
           templateBody,
           recruit,
           sender: senderProfile,
-          
+
         });
 
         previews.push({
