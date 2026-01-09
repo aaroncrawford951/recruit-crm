@@ -28,10 +28,16 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             flexWrap: "wrap",
           }}
         >
-          {/* Logo */}
-          <Link href="/recruits" style={{ display: "flex", alignItems: "center" }}>
-            <img src="/logo.png" alt="Company Logo" style={{ height: 32 }} />
-          </Link>
+<img
+  src="/logo.png"
+  alt="RecruitTrack"
+  style={{
+    height: 36,
+    width: "auto",
+    objectFit: "contain",
+  }}
+/>
+
 
           {/* Main nav */}
           <div style={{ display: "flex", gap: 16, alignItems: "center", flexWrap: "wrap" }}>
