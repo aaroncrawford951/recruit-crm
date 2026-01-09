@@ -1,4 +1,4 @@
-// pages/api/cron/send-followups.ts
+// pages/api/cron/send-follow-ups.ts
 import type { NextApiRequest, NextApiResponse } from "next";
 import { createClient } from "@supabase/supabase-js";
 import { sendSms } from "@/lib/sms/sendSms";
@@ -13,10 +13,31 @@ const supabaseAdmin = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
+function getBearerToken(req: NextApiRequest) {
+  const auth = req.headers.authorization || "";
+  if (auth.startsWith("Bearer ")) return auth.slice(7).trim();
+  return null;
+}
+
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   try {
-    const secret = String(req.query.secret ?? "");
-    if (!secret || secret !== process.env.CRON_SECRET) {
+    // ✅ Only allow POST (prevents random browser hits / crawlers)
+    if (req.method !== "POST") {
+      return res.status(405).json({ error: "Method not allowed. Use POST." });
+    }
+
+    // ✅ CRON secret check
+    const configuredSecret = process.env.CRON_SECRET;
+    if (!configuredSecret) {
+      return res.status(500).json({ error: "CRON_SECRET is not set on the server" });
+    }
+
+    // Prefer Authorization header; allow ?secret= as fallback
+    const headerToken = getBearerToken(req);
+    const querySecret = typeof req.query.secret === "string" ? req.query.secret : "";
+    const provided = headerToken || querySecret;
+
+    if (!provided || provided !== configuredSecret) {
       return res.status(401).json({ error: "Unauthorized" });
     }
 
@@ -27,16 +48,16 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       .from("follow_ups")
       .select(
         `
-        id,
-        owner_user_id,
-        recruit_id,
-        template_id,
-        scheduled_for,
-        attempt_count,
-        status,
-        message_templates:template_id ( body ),
-        recruits:recruit_id ( first_name, last_name, phone )
-      `
+          id,
+          owner_user_id,
+          recruit_id,
+          template_id,
+          scheduled_for,
+          attempt_count,
+          status,
+          message_templates:template_id ( body ),
+          recruits:recruit_id ( first_name, last_name, phone )
+        `
       )
       .eq("status", "scheduled")
       .lte("scheduled_for", nowIso)
@@ -87,7 +108,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
           templateBody,
           recruit,
           sender: senderProfile,
-          prefix: "[CRON_V2]",
+          
         });
 
         previews.push({
@@ -106,7 +127,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
           to: recruit.phone,
           body: renderedBody,
           meta: {
-            route: "pages/api/cron/send-followups",
+            route: "pages/api/cron/send-follow-ups",
             follow_up_id: followUpId,
             recruit_id: fu.recruit_id,
             owner_user_id: fu.owner_user_id,
